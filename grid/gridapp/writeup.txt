@@ -1,0 +1,34 @@
+-Increasing grid size dramatically slows down execution of the program/reduces performance
+
+-Higher Number of threads dramatically increases speed of execution/increases performance
+
+-Having locks is inherently slower than not having them, but after their introduction, having more granularity 
+ speeds things up quite significantly
+
+-Fine locking granularity is the fastest because it allows access to the most concurrent resources (no lock aside). 
+ This means that threads can spend more time performing operations, rather than waiting for their needed resource
+ to become available.
+
+-As far as I can tell, the sleep is there to ensure that threads synchronize properly, and to ensure that linux 
+ actually gets all the threads into its scheduler rather than allowing one thread to blitz through all the cells
+ as fast as it can.
+	-I found that reducing the sleep call in do_swaps to under 500ms actually caused some slowdown.
+	-Without the sleep present, we actually get worse performance scaling, or negative performance scaling, on 
+	 higher thread counts.
+	-This means that, without it, this lab would be better off as a single-threaded application assignment!
+	-This means that multithreading/synchronization tend to make sense when threads have larger workloads 
+	 than we're giving them here.
+
+-I have three layers of deadlock prevention:
+
+	1) The application will always grab cells/rows in the same order. This will ensure a minimal number of 
+	   collisions in general, but will not cover any cases where we have more threads than we have resources
+	   to lock (such as 10 threads but a 2x2 grid)
+
+	2) The application will not acquire the lock to a resource unless it can also acquire a lock to the other
+	   required resource. That is, it will not take any locks unless it can take every lock it needs. This 
+	   should completely prevent deadlock, but it would be terribly slow without the above.
+
+	3) I make sure to check and prevent the acquisition of a lock twice. There are instances where the 
+	   application will attempt to swap a cell or row with itself, and in those instances, I ensure that 
+	   the lock is only taken once. This prevents a self-dependency loop.
