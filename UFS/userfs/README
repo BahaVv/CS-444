@@ -1,5 +1,65 @@
-
 Try:
 
  ./userfs -reformat 200000 foo
  ./userfs foo
+
+------------------
+
+Name: Adam Kimball
+ID: 0286149
+
+What works:
+-Import
+-Export
+-Ls
+-Clean exit
+-Delete
+-FSCK
+-Recovery in general
+
+Known bugs:
+-Export is a bit buggy on polaris. For whatever reason,
+ some of the data at the top gets clobbered with garbage
+ data. Works fine locally.
+
+Filemap:
+
+ -crash.c, crash.h: contains crashwrite commands -- spawns thread for writing, 
+  instructs main thread to crash on next write, etc
+
+ -parse.c, parse.h: Parser! Largely transparent to me, handles inputs.
+
+ -README: This.
+
+ -userfs.c, userfs.h: Fairly obvious, this contains all the primary implementation
+  of the actual user file system.
+
+
+u_import:
+
+ Performs all the sanity checks (makes sure enough data blocks exist in UFS, makes sure
+ file exists, ensures no files of same name exist, etc). Then, it simply walks through each
+ free data block, and writes out equivalent amounts of data from the file to them. It updates
+ the inode to ensure that it points to the correct data, then updates the directort, then
+ the superblock, then the bitmap information.
+
+u_export:
+
+ Opens the linux file on disk. Finds the inode relevant to the data we're looking for,
+ walks through all the relevant data blocks, and writes them out to disk. When it's done,
+ it closes the file.  
+
+u_del:
+
+ Gets the inode for the file, walks through all the data blocks, and frees them. Then it
+ frees the inode, updates the directory, superblock, and bitmap. 
+
+u_fsck:
+
+ For each inode, fsck attempts to correlate it back to the bitmap. If it can, we tag it as found,
+ and do nothing. Otherwise, we declare it to be an orphaned inode, and we free all of its data blocks,
+ then free it, and update the directory, superblock, and bitmap.
+
+
+I follow the same write/update pattern every time to try to allow for easy recovery. That's all there is 
+to it. That way, I can easily figure out where exactly we failed by the state the data is in. 

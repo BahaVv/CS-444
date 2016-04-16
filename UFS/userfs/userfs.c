@@ -8,7 +8,6 @@
 #include <readline/readline.h>
 #include <readline/history.h>
 #include <assert.h>
-#include <stat.h>
 #include "parse.h"
 #include "userfs.h"
 #include "crash.h"
@@ -366,8 +365,13 @@ int u_quota()
 int u_import(char* linux_file, char* u_file)
 {
 	int free_space;
+	int free_space_in_bytes;
 	free_space = u_quota();
-	free_space_in_bytes = free_space * 512;
+	free_space_in_bytes = free_space * BLOCK_SIZE_BYTES;
+
+	// Get around this assignment's silly syntax
+	int true = TRUE;
+	int false = FALSE;
 
 	int handle = open(linux_file,O_RDONLY);
 	if ( -1 == handle ) {
@@ -375,9 +379,9 @@ int u_import(char* linux_file, char* u_file)
 		return 0;
 	}
 
-	read(handle,&buffer,BLOCK_SIZE_BYTES);
+	//read(handle,&buffer,BLOCK_SIZE_BYTES);
 
-	crash_write(virtual_disk, &buffer, 1999 );
+	//crash_write(virtual_disk, &buffer, 1999 );
   
 
 	/* write rest of code for importing the file.
@@ -397,39 +401,125 @@ int u_import(char* linux_file, char* u_file)
 		-Update all the things!
 			-bitmap, directory, inode, datablocks, superblock(?)
 			-Ordering? Partial operation on crash?
+				-datablock (orphan if crash), then bitmap, then inode, 
+			     directory, superblock
 	*/
 
 	// Check to see if the intended file name fits out conventions
-	if(strlen(u_file) > MAX_FILE_NAME_SIZE || strlen(u_file) == 0;){
+	if(strlen(u_file) > MAX_FILE_NAME_SIZE || strlen(u_file) == 0){
 		printf("\nError: Intended UFS file name is invalid!\n");
-		return 1;
+		return 0;
 	}	
 
 	struct stat stbuf; // Our file info structure
 	
+	// Get file info
 	if (stat(linux_file, &stbuf) == -1){
 		printf("\n Error: File not found in the linux file system!\n");
-		return 1;
+		return 0;
 	}
 
-	off_t file_size = *stbuf.st_size;
+	off_t file_size = stbuf.st_size;
 
+	// Make sure there's enough space on the UFS to hold the file
 	if (file_size > free_space_in_bytes){
 		printf("\n Error: Not enough room in UFS! \n");	
-		return 1;
+		return 0;
 	}
 
-	if ((file_size/512) > MAX_BLOCKS_PER_FILE){
+	// Make sure the file does not exceed our max block size per file
+	if ((file_size/BLOCK_SIZE_BYTES) > MAX_BLOCKS_PER_FILE){
 		printf("\n Error: File is too large to fit in max block size!\n");
-		return 1;
+		return 0;
 	}
 
-	//Move from 0 to MAX_INODES, read each inode and see if it's used	
+	// Check to see if a file of the same name exists already
+	for (int i = 0; i < MAX_FILES_PER_DIRECTORY; i++){
+		if (!(dir.u_file[i].free) && strcmp(dir.u_file[i].file_name, u_file) == 0){
+			printf("\n Error: File already exists in UFS!\n");
+			return 0;
+		}
+	}
+
+	// Get first free file index
+	int free_file_idx = -1;
+	for (int i = 0; i < MAX_FILES_PER_DIRECTORY; i++){
+		if(dir.u_file[i].free){
+			free_file_idx = i;
+			break;
+		}
+	}
+
+	// Make sure we got a free file index
+	if (free_file_idx == -1){
+		printf("\nError: UFS is at max file cap!\n");
+		return 0;
+	}
+
+	// Additional sanity check: Make sure we didn't somehow get past earlier check w/ no free files
+	if (dir.no_files >= MAX_FILES_PER_DIRECTORY){
+		printf("\nError: UFS has no available files!\n");
+		return 0;
+	}
+
+	// Check to see if we have an available inode
+	int inode_idx;
+	for(int i = 0; i <= MAX_INODES; i++){
+		read_inode(i, &curr_inode);
+		if(curr_inode.free == true){
+			inode_idx = i;
+			break;
+		}else if(inode_idx == MAX_INODES){
+			printf("\n Error: No free inodes in UFS!\n");
+			return 0;
+		}
+	}
+
+	// Alright! Should be guaranteed to write a file now.
+
+	dir.u_file[free_file_idx].inode_number = inode_idx;
+	strncpy(dir.u_file[free_file_idx].file_name, u_file, MAX_FILE_NAME_SIZE);
+	dir.u_file[free_file_idx].free = false;
 	
+	curr_inode.no_blocks = ((stbuf.st_size +(BLOCK_SIZE_BYTES - 1)) / BLOCK_SIZE_BYTES); 	
+	curr_inode.file_size_bytes = stbuf.st_size;
+	curr_inode.free = false;
 
+	dir.no_files = dir.no_files + 1;
 
+	int block = 0;
+	for (int i = 0; i < curr_inode.no_blocks; i++){
+		if(bit_map[i] == 0){
+			allocate_block(i);
+			curr_inode.blocks[block] = i;
+			block++;
+			if (block >= curr_inode.no_blocks){
+				break;
+			}
+		}
+	}
+
+	for (int i = 0; i < curr_inode.no_blocks; i++){
+		read(handle, &buffer, BLOCK_SIZE_BYTES);
+		lseek(virtual_disk, BLOCK_SIZE_BYTES * curr_inode.blocks[i], SEEK_SET);
+		crash_write(virtual_disk, &buffer, sizeof(buffer));
+	}
+
+	close(handle);
+
+	lseek(virtual_disk, BIT_MAP_BLOCK * BLOCK_SIZE_BYTES, SEEK_SET);
+	crash_write(virtual_disk, bit_map, sizeof(bit_map));
+	
+	write_inode(inode_idx, &curr_inode);	
+
+	lseek(virtual_disk, DIRECTORY_BLOCK * BLOCK_SIZE_BYTES, SEEK_SET);
+	crash_write(virtual_disk, &dir, sizeof(dir));
+	
+	lseek(virtual_disk, SUPERBLOCK_BLOCK * BLOCK_SIZE_BYTES, SEEK_SET);
+	crash_write(virtual_disk, &sb, sizeof(sb));
+	
  
-	return 0;
+	return 1;
 }
 
 
@@ -451,8 +541,42 @@ int u_export(char* u_file, char* linux_file)
 
 	  read the data out of ufs and write it into the external file
 	*/
+	
+	int handle = open(linux_file,O_WRONLY|O_CREAT|O_TRUNC,S_IRGRP|S_IWGRP|S_IRUSR|S_IWUSR);
+	if ( -1 == handle ) {
+		printf("error, reading file %s\n",linux_file);
+		return 0;
+	}
 
-	return 0; 
+	for (int i = 0; i < MAX_FILES_PER_DIRECTORY; i++){
+		if(!(dir.u_file[i].free) && strcmp(dir.u_file[i].file_name, u_file) == 0){
+			read_inode(dir.u_file[i].inode_number, &curr_inode);
+			break;
+		}else if(i == (MAX_FILES_PER_DIRECTORY -1)){
+			printf("\nError: The requested UFS file for export was not found!\n");
+			return 0;
+		}
+	}
+
+	int to_read = curr_inode.file_size_bytes;
+	int been_read;
+	for(int i = 0; i < curr_inode.no_blocks; i++){
+		lseek(virtual_disk, curr_inode.blocks[i] * BLOCK_SIZE_BYTES, SEEK_SET);
+		if(to_read >= BLOCK_SIZE_BYTES){
+			been_read = read(virtual_disk, buffer, BLOCK_SIZE_BYTES);
+			to_read = to_read - been_read;
+		} else {
+			been_read = read(virtual_disk, buffer, to_read);
+			to_read = to_read - been_read;
+		}
+		write(handle, buffer, been_read);
+	}
+
+	sync();
+	close(handle);
+	
+	
+	return 1; 
 }
 
 
@@ -472,7 +596,32 @@ int u_del(char* u_file)
 	  superblock only has to be up-to-date on clean shutdown?
 	*/
 
-	return 0;
+	int file_idx;
+	for (file_idx = 0; file_idx < MAX_FILES_PER_DIRECTORY; file_idx++){
+		if(!(dir.u_file[file_idx].free) && strcmp(dir.u_file[file_idx].file_name, u_file) == 0){
+			read_inode(dir.u_file[file_idx].inode_number, &curr_inode);
+			break;
+		}else if(file_idx == (MAX_FILES_PER_DIRECTORY-1)){
+			printf("\nError: The requested UFS file for deletion was not found!\n");
+			return 0;
+		}
+	}
+
+	dir.no_files = dir.no_files - 1;
+
+	dir.u_file[file_idx].free = TRUE;
+	strncpy(dir.u_file[file_idx].file_name, "", MAX_FILE_NAME_SIZE);
+
+	curr_inode.file_size_bytes = 0;
+	curr_inode.free = TRUE;
+
+	for(int i  = 0; i < curr_inode.no_blocks; i++){
+		free_block(curr_inode.blocks[i]);
+	}	
+
+	write_inode(dir.u_file[file_idx].inode_number, &curr_inode);
+
+	return 1;
 }
 
 /*
@@ -490,8 +639,51 @@ int u_fsck()
 	  pointed to by a file?
 	*/
 
+	for (int i = 0; i < MAX_INODES; i++){
+		read_inode(i, &curr_inode);
+		if(curr_inode.free == 0){
+			for (int j = 0; j < MAX_FILES_PER_DIRECTORY; j++){
+				if(dir.u_file[j].inode_number == i){
+					break;
+				}else if(j == (MAX_FILES_PER_DIRECTORY-1)){
+					printf("\nError: Orphaned inode found in UFS! UFS is inconsistent!\n");
+					return 0;
+				}
+			}
+		}
+		
+		int found = FALSE;
+		for (int i = (INODE_BLOCK + NUM_INODE_BLOCKS); i < sb.disk_size_blocks; i++){
+			if(bit_map[i] == 1){
+				for(int j = 0; j < MAX_INODES; j++){
+					read_inode(j, &curr_inode);
+					for(int k = 0; k < curr_inode.no_blocks; k++){
+						if(curr_inode.blocks[k] == i){
+							j = MAX_INODES;
+							found = TRUE;
+							break;
+						}
+					}
+				}
+				if (found == FALSE){
+					printf("\nEWarning: A Block was found that is allocated, but not pointed to by any inode!\n");
+					printf("\nClearing it...\n");
+					free_block(i);
+				}
+			}
+		}
+	}
 
-	return 0;
+	lseek(virtual_disk, SUPERBLOCK_BLOCK * BLOCK_SIZE_BYTES, SEEK_SET);
+	write(virtual_disk, &sb, sizeof(sb));
+	lseek(virtual_disk, BIT_MAP_BLOCK * BLOCK_SIZE_BYTES, SEEK_SET);
+	write(virtual_disk, bit_map, sizeof(bit_map));
+	lseek(virtual_disk, DIRECTORY_BLOCK * BLOCK_SIZE_BYTES, SEEK_SET);
+	write(virtual_disk, &dir, sizeof(dir));
+	sync();
+
+	return 1;
+
 }
 /*
  * Iterates through the directory and prints the 
@@ -691,7 +883,7 @@ int u_clean_shutdown()
 	   return 1 for success, 0 for failure */
   
 	sb.num_free_blocks = u_quota();
-	sb.clean_shutdown = 1;
+	sb.clean_shutdown = 0;
 
 	lseek(virtual_disk, BLOCK_SIZE_BYTES* SUPERBLOCK_BLOCK, SEEK_SET);
 	crash_write(virtual_disk, &sb, sizeof(superblock));
